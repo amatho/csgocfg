@@ -1,4 +1,4 @@
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use std::{
     collections::HashMap,
     fs::File,
@@ -9,6 +9,13 @@ use std::{
 enum Command {
     Patch { target: PathBuf, patch: PathBuf },
     Unrecognized(String),
+}
+
+enum ConfigItem<'a> {
+    Cmd(&'a str),
+    CmdWithArgs(&'a str, &'a str, &'a str),
+    Cvar(&'a str, &'a str),
+    Empty,
 }
 
 fn parse_args<T>(args: T) -> Result<Command>
@@ -42,38 +49,59 @@ where
     Ok(command)
 }
 
-fn parse_config_line(line: &str) -> Result<(String, String)> {
-    let mut split_index = None;
-    let mut chars = line.chars().peekable();
-    let mut index = 0;
+fn parse_config_line(line: &str) -> Result<ConfigItem> {
+    let line = if let Some(index) = line.find("//") {
+        &line[..index]
+    } else {
+        &line
+    };
 
-    while let Some(c) = chars.next() {
-        if c == '/' && chars.peek().map_or(false, |next| *next == '/') {
-            break;
-        } else if split_index.is_none() && c == ' ' {
-            split_index = Some(index);
-        }
-
-        index += 1;
+    if line.is_empty() {
+        return Ok(ConfigItem::Empty);
     }
 
-    ensure!(split_index.is_some(), "invalid line in config");
+    let parts: Vec<_> = line.split_whitespace().collect();
 
-    let split = split_index.unwrap();
-    let cvar = line[..split].to_owned();
-    let val = line[split + 1..index].to_owned();
+    let item = match parts.len() {
+        1 => ConfigItem::Cmd(parts[0]),
+        2 => {
+            let cvar = parts[0];
+            let val = parts[1];
 
-    Ok((cvar, val))
+            ConfigItem::Cvar(cvar, val)
+        }
+        3 => {
+            let cmd = parts[0];
+            let arg1 = parts[1];
+            let arg2 = parts[2];
+
+            ConfigItem::CmdWithArgs(cmd, arg1, arg2)
+        }
+    };
+
+    Ok(item)
 }
 
 fn apply_patch(target: PathBuf, patch: PathBuf) -> Result<()> {
     let patch_file = BufReader::new(File::open(patch)?);
-    let mut patch_lookup: HashMap<String, String> = HashMap::new();
+    let mut patch_lookup: HashMap<String, ConfigItem> = HashMap::new();
 
     for line in patch_file.lines() {
         let line = line?;
-        let (cvar, val) = parse_config_line(&line)?;
-        patch_lookup.insert(cvar, val);
+        let config_item = parse_config_line(&line)?;
+
+        match config_item {
+            ConfigItem::Cmd(cmd) => {
+                patch_lookup.insert(cmd.to_owned(), config_item);
+            }
+            ConfigItem::CmdWithArgs(cmd, ..) => {
+                patch_lookup.insert(cmd.to_owned(), config_item);
+            }
+            ConfigItem::Cvar(cvar, ..) => {
+                patch_lookup.insert(cvar.to_owned(), config_item);
+            }
+            ConfigItem::Empty => (),
+        }
     }
 
     let target_reader = BufReader::new(File::open(&target)?);
@@ -81,20 +109,9 @@ fn apply_patch(target: PathBuf, patch: PathBuf) -> Result<()> {
 
     for line in target_reader.lines() {
         let line = line?;
-        let split_index = line.find(' ').context("invalid line in config")?;
-        let cvar = &line[..split_index];
-        let mut val = &line[split_index + 1..];
-        if let Some(index) = val.find("//") {
-            val = &val[..index];
-        }
+        let config_item = parse_config_line(&line)?;
 
-        if patch_lookup.contains_key(cvar) {
-            val = patch_lookup.get(cvar).map_or(val, |v| v);
-        }
-
-        new_contents.push_str(cvar);
-        new_contents.push_str(" ");
-        new_contents.push_str(val);
+        match config_item {}
     }
 
     let mut target_file = File::create(&target)?;
