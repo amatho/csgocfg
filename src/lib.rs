@@ -1,46 +1,18 @@
-use anyhow::{anyhow, bail, Context, Result};
+mod config;
+mod parser;
+
+use anyhow::{anyhow, Context, Result};
+use config::ConfigItem;
 use std::{
-    collections::HashMap,
+    collections::BTreeSet,
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
 enum Command {
     Patch { target: PathBuf, patch: PathBuf },
     Unrecognized(String),
-}
-
-enum ConfigItem<'a> {
-    Cmd(&'a str),
-    CmdWithArgs(&'a str, &'a str, &'a str),
-    Cvar(&'a str, &'a str),
-    Empty,
-}
-
-impl<'a> ConfigItem<'a> {
-    fn push_to_string(&self, string: &mut String) {
-        match self {
-            ConfigItem::Cmd(cmd) => {
-                string.push_str(cmd);
-            }
-            ConfigItem::CmdWithArgs(cmd, arg1, arg2) => {
-                string.push_str(cmd);
-                string.push(' ');
-                string.push_str(arg1);
-                string.push(' ');
-                string.push_str(arg2);
-            }
-            ConfigItem::Cvar(cvar, val) => {
-                string.push_str(cvar);
-                string.push(' ');
-                string.push_str(val);
-            }
-            ConfigItem::Empty => (),
-        }
-
-        string.push('\n');
-    }
 }
 
 fn parse_args<T>(args: T) -> Result<Command>
@@ -74,97 +46,36 @@ where
     Ok(command)
 }
 
-fn parse_config_line(line: &str) -> Result<ConfigItem> {
-    let line = line.trim();
-
-    if line.is_empty() {
-        return Ok(ConfigItem::Empty);
-    }
-
-    let mut parts = Vec::new();
-    let mut parsing_quotes = false;
-    let mut start = 0;
-    for (index, c) in line.char_indices() {
-        if !parsing_quotes && c == '"' {
-            parsing_quotes = true;
-        } else if !parsing_quotes && c == ' ' {
-            parts.push(&line[start..index]);
-            start = index + 1;
-        } else if !parsing_quotes && c == '/' {
-            if &line[index + 1..index + 2] == "/" {
-                break;
-            }
-        } else if parsing_quotes && c == '"' {
-            parsing_quotes = false;
-        }
-    }
-
-    parts.push(&line[start..]);
-
-    let item = match parts[..] {
-        [cmd] => ConfigItem::Cmd(cmd),
-        [cvar, val] => ConfigItem::Cvar(cvar, val),
-        [cmd, arg1, arg2] => ConfigItem::CmdWithArgs(cmd, arg1, arg2),
-        _ => {
-            dbg!(parts);
-            bail!("invalid config line: {}", line)
-        }
-    };
-
-    Ok(item)
-}
-
 fn apply_patch(target: PathBuf, patch: PathBuf) -> Result<()> {
-    let mut patch_file = File::open(patch)?;
-    let mut patch_contents = String::new();
-    patch_file.read_to_string(&mut patch_contents)?;
-    drop(patch_file);
-
-    let mut patch_lookup: HashMap<&str, ConfigItem> = HashMap::new();
-
-    for line in patch_contents.lines() {
-        let config_item = parse_config_line(&line)?;
-
-        match config_item {
-            ConfigItem::Cmd(cmd) => {
-                patch_lookup.insert(cmd, config_item);
-            }
-            ConfigItem::CmdWithArgs(cmd, ..) => {
-                patch_lookup.insert(cmd, config_item);
-            }
-            ConfigItem::Cvar(cvar, ..) => {
-                patch_lookup.insert(cvar, config_item);
-            }
-            ConfigItem::Empty => (),
-        }
-    }
+    let mut config_set: BTreeSet<ConfigItem> = BTreeSet::new();
 
     let target_reader = BufReader::new(File::open(&target)?);
-    let mut new_contents = String::new();
-
     for line in target_reader.lines() {
         let line = line?;
-        let config_item = parse_config_line(&line)?;
+        let config_item = parser::parse_line(&line)?;
 
-        let new_config_item = match config_item {
-            ConfigItem::Cmd(cmd) => patch_lookup.remove(cmd).unwrap_or(config_item),
-            ConfigItem::CmdWithArgs(cmd, ..) => patch_lookup.remove(cmd).unwrap_or(config_item),
-            ConfigItem::Cvar(cvar, ..) => patch_lookup.remove(cvar).unwrap_or(config_item),
-            ConfigItem::Empty => config_item,
-        };
-
-        new_config_item.push_to_string(&mut new_contents);
+        if let Some(item) = config_item {
+            config_set.insert(item);
+        }
     }
 
-    for (_, value) in patch_lookup {
-        value.push_to_string(&mut new_contents);
+    let patch_reader = BufReader::new(File::open(&patch)?);
+    for line in patch_reader.lines() {
+        let line = line?;
+        let config_item = parser::parse_line(&line)?;
+
+        if let Some(item) = config_item {
+            config_set.replace(item);
+        }
     }
 
     let mut target_file = OpenOptions::new()
         .write(true)
         .truncate(true)
         .open(&target)?;
-    target_file.write_all(new_contents.as_bytes())?;
+    for value in config_set {
+        value.write_string(&mut target_file)?;
+    }
 
     Ok(())
 }
