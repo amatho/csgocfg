@@ -12,35 +12,38 @@ use std::{
 
 enum Command {
     Patch { target: PathBuf, patch: PathBuf },
+    Validate { target: PathBuf },
     Unrecognized(String),
 }
 
-fn parse_args<T>(args: T) -> Result<Command>
-where
-    T: IntoIterator,
-    T::Item: AsRef<str>,
-{
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
     let mut args = args.into_iter();
 
-    let command = match args
-        .next()
-        .ok_or_else(|| anyhow!("no command specified"))?
-        .as_ref()
-    {
+    let command = args.next().ok_or_else(|| anyhow!("no command specified"))?;
+
+    let command = match &command[..] {
         "patch" => {
             let target_path = args.next().ok_or_else(|| anyhow!("no target specified"))?;
-            let target = Path::new(target_path.as_ref())
+            let target = Path::new(&target_path)
                 .canonicalize()
-                .with_context(|| format!("could not find the file {:?}", target_path.as_ref()))?;
+                .with_context(|| format!("could not find the file {:?}", target_path))?;
 
             let patch_path = args.next().ok_or_else(|| anyhow!("no patch specified"))?;
-            let patch = Path::new(patch_path.as_ref())
+            let patch = Path::new(&patch_path)
                 .canonicalize()
-                .with_context(|| format!("could not find the file {:?}", patch_path.as_ref()))?;
+                .with_context(|| format!("could not find the file {:?}", patch_path))?;
 
             Command::Patch { target, patch }
         }
-        s => Command::Unrecognized(s.to_owned()),
+        "validate" => {
+            let target_path = args.next().ok_or_else(|| anyhow!("no target specified"))?;
+            let target = Path::new(&target_path)
+                .canonicalize()
+                .with_context(|| format!("could not find the file {:?}", target_path))?;
+
+            Command::Validate { target }
+        }
+        _ => Command::Unrecognized(command),
     };
 
     Ok(command)
@@ -80,12 +83,24 @@ fn apply_patch(target: PathBuf, patch: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn validate(target: PathBuf) -> Result<()> {
+    let target_reader = BufReader::new(File::open(&target)?);
+    for line in target_reader.lines() {
+        let line = line?;
+        parser::parse_line(&line)?;
+    }
+
+    println!("Config `{}` is valid.", target.display());
+
+    Ok(())
+}
+
 pub fn run() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let command = parse_args(&args[1..])?;
+    let command = parse_args(std::env::args().skip(1))?;
 
     match command {
         Command::Patch { target, patch } => apply_patch(target, patch)?,
+        Command::Validate { target } => validate(target)?,
         Command::Unrecognized(s) => return Err(anyhow!("unrecognized command, {:?}", s)),
     }
 
