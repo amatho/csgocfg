@@ -1,208 +1,165 @@
 use crate::config::ConfigItem;
-use anyhow::{anyhow, Result};
+use thiserror::Error;
 
 type ParseResult<'a, Output> = Result<(&'a str, Output), &'a str>;
 
-trait Parser<'a, Output> {
-    fn parse(&self, input: &'a str) -> ParseResult<'a, Output>;
-}
-
-impl<'a, F, Output> Parser<'a, Output> for F
-where
-    F: Fn(&'a str) -> ParseResult<Output>,
-{
-    fn parse(&self, input: &'a str) -> ParseResult<'a, Output> {
-        self(input)
+fn match_literal(expected: &'static str) -> impl Fn(&str) -> ParseResult<&'static str> {
+    move |input: &str| {
+        let n = expected.len();
+        match input
+            .chars()
+            .zip(expected.chars())
+            .position(|(a, b)| a != b)
+        {
+            None if input.len() >= n => Ok((&input[n..], expected)),
+            _ => Err(input),
+        }
     }
 }
 
-fn match_literal<'a>(expected: &'static str) -> impl Parser<'a, ()> {
-    move |input: &'a str| match input.starts_with(expected) {
-        true => Ok((&input[expected.len()..], ())),
-        false => Err(input),
+fn ignore_whitespace(input: &str) -> &str {
+    match input.chars().position(|c| c != ' ') {
+        Some(index) => &input[index..],
+        _ => &input[input.len()..],
     }
 }
 
-fn match_space(input: &str) -> ParseResult<()> {
-    match_literal(" ").parse(input)
-}
-
-fn ignore_whitespace(mut input: &str) -> &str {
-    while let Ok((i, _)) = match_space(input) {
-        input = i;
-    }
-    input
-}
-
-fn match_until_literal<'a>(expected: &'static str) -> impl Parser<'a, &'a str> {
-    move |input: &'a str| match input.find(expected) {
+fn match_until_char(expected: char) -> impl Fn(&str) -> ParseResult<&str> {
+    move |input: &str| match input.chars().position(|c| c == expected) {
         Some(index) => Ok((&input[index..], &input[..index])),
-        None => Err(input),
+        _ => Err(input),
     }
 }
 
 fn identifier(input: &str) -> ParseResult<&str> {
-    let mut char_indices = input.char_indices();
+    let mut chars = input.chars();
 
-    let mut index = match char_indices.next() {
-        Some((i, c)) if c.is_alphabetic() || c == '_' || c == '@' => i,
-        _ => return Err(input),
+    if chars
+        .next()
+        .filter(|&c| c.is_alphabetic() || c == '_' || c == '@')
+        .is_none()
+    {
+        return Err(input);
     };
 
-    for (i, c) in input.char_indices() {
-        if c.is_alphanumeric() || c == '_' || c == '@' {
-            index = i;
-        } else {
-            break;
-        }
+    match chars.position(|c| !(c.is_alphanumeric() || c == '_' || c == '@')) {
+        Some(index) => Ok((&input[index + 1..], &input[..index + 1])),
+        None => Ok((&input[input.len()..], input)),
     }
-
-    Ok((&input[index + 1..], &input[..=index]))
 }
 
 fn string_literal(input: &str) -> ParseResult<&str> {
     let match_quote = match_literal("\"");
-    let match_until_quote = match_until_literal("\"");
+    let match_until_quote = match_until_char('"');
 
-    match_quote
-        .parse(input)
-        .and_then(|(i, _)| match_until_quote.parse(i))
-        .and_then(|(i, contents)| match_quote.parse(i).map(|(i, _)| (i, contents)))
+    match_quote(input)
+        .and_then(|(i, _)| match_until_quote(i))
+        .and_then(|(i, contents)| match_quote(i).map(|(i, _)| (i, contents)))
 }
 
 fn is_empty_or_comment(input: &str) -> bool {
-    input.is_empty() || match_literal("//").parse(input).is_ok()
+    input.is_empty() || match_literal("//")(input).is_ok()
 }
 
-struct State<S> {
-    state: S,
+#[derive(Error, Debug, PartialEq)]
+pub enum ParseError {
+    #[error("invalid identifier `{0}`")]
+    InvalidIdentifier(String),
+    #[error("invalid string literal (expected `\"...\"`, found `{0}`)")]
+    InvalidStringLiteral(String),
+    #[error("unexpected end of line, `{0}`")]
+    UnexpectedEndOfLine(String),
 }
 
-enum MaybeTransition<S> {
-    Next(State<S>),
-    Done(Option<ConfigItem>),
-    Err(anyhow::Error),
-}
+pub fn parse_line(line: &str) -> Result<Option<ConfigItem>, ParseError> {
+    // A line looks like
+    // command {argument 1} {argument 2} [COMMENT]
+    // where the number of arguments can be either 0, 1, or 2.
+    // Whitespace is optional and can appear zero or more times between the tokens above.
 
-impl<S> MaybeTransition<S> {
-    fn map<NS>(self, f: impl Fn(State<S>) -> MaybeTransition<NS>) -> MaybeTransition<NS> {
-        match self {
-            MaybeTransition::Next(s) => f(s),
-            MaybeTransition::Done(ci) => MaybeTransition::Done(ci),
-            MaybeTransition::Err(e) => MaybeTransition::Err(e),
-        }
+    // [COMMENT]
+    let input = ignore_whitespace(line);
+    if is_empty_or_comment(input) {
+        return Ok(None);
     }
 
-    fn map_result(
-        self,
-        f: impl Fn(State<S>) -> Result<Option<ConfigItem>>,
-    ) -> Result<Option<ConfigItem>> {
-        match self {
-            MaybeTransition::Next(s) => f(s),
-            MaybeTransition::Done(ci) => Ok(ci),
-            MaybeTransition::Err(e) => Err(e),
-        }
-    }
-}
-
-struct IdentParser<'a> {
-    input: &'a str,
-}
-
-impl<'a> State<IdentParser<'a>> {
-    fn init(input: &'a str) -> MaybeTransition<IdentParser<'a>> {
-        let input = ignore_whitespace(input);
-
-        if is_empty_or_comment(input) {
-            MaybeTransition::Done(None)
-        } else {
-            MaybeTransition::Next(State {
-                state: IdentParser { input },
-            })
-        }
+    // command [COMMENT]
+    let (input, cmd) =
+        identifier(input).map_err(|i| ParseError::InvalidIdentifier(i.to_owned()))?;
+    let input = ignore_whitespace(input);
+    if is_empty_or_comment(input) {
+        return Ok(Some(ConfigItem::Command(cmd.to_owned())));
     }
 
-    fn next(self) -> MaybeTransition<CvarParser<'a>> {
-        let (input, ident) = match identifier(self.state.input) {
-            Ok(r) => r,
-            Err(i) => return MaybeTransition::Err(anyhow!("invalid identifier, {}", i)),
-        };
-
-        let input = ignore_whitespace(input);
-        if is_empty_or_comment(input) {
-            MaybeTransition::Done(Some(ConfigItem::Command(ident.to_owned())))
-        } else {
-            MaybeTransition::Next(State {
-                state: CvarParser { input, cvar: ident },
-            })
-        }
+    // command "argument 1" [COMMENT]
+    let (input, arg1) =
+        string_literal(input).map_err(|i| ParseError::InvalidStringLiteral(i.to_owned()))?;
+    let input = ignore_whitespace(input);
+    if is_empty_or_comment(input) {
+        return Ok(Some(ConfigItem::Cvar(cmd.to_owned(), arg1.to_owned())));
     }
-}
 
-struct CvarParser<'a> {
-    input: &'a str,
-    cvar: &'a str,
-}
-
-impl<'a> State<CvarParser<'a>> {
-    fn next(self) -> MaybeTransition<BindParser<'a>> {
-        let (input, val) = match string_literal(self.state.input) {
-            Ok(r) => r,
-            Err(i) => return MaybeTransition::Err(anyhow!("invalid string literal, {}", i)),
-        };
-
-        let input = ignore_whitespace(input);
-        if is_empty_or_comment(input) {
-            MaybeTransition::Done(Some(ConfigItem::Cvar(
-                self.state.cvar.to_owned(),
-                val.to_owned(),
-            )))
-        } else {
-            MaybeTransition::Next(State {
-                state: BindParser {
-                    input,
-                    bind_command: self.state.cvar,
-                    key: val,
-                },
-            })
-        }
+    // command "argument 1" "argument 2" [COMMENT]
+    let (input, arg2) =
+        string_literal(input).map_err(|i| ParseError::InvalidStringLiteral(i.to_owned()))?;
+    let input = ignore_whitespace(input);
+    if is_empty_or_comment(input) && cmd == "bind" {
+        return Ok(Some(ConfigItem::Bind(arg1.to_owned(), arg2.to_owned())));
     }
+
+    Err(ParseError::UnexpectedEndOfLine(input.to_owned()))
 }
 
-struct BindParser<'a> {
-    input: &'a str,
-    bind_command: &'a str,
-    key: &'a str,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl<'a> State<BindParser<'a>> {
-    fn next(self) -> Result<Option<ConfigItem>> {
-        if self.state.bind_command != "bind" {
-            return Err(anyhow!(
-                "expected command 'bind', found {} in {}",
-                self.state.bind_command,
-                self.state.input
-            ));
-        }
+    #[test]
+    fn test_bind_parsing() -> Result<(), ParseError> {
+        assert_eq!(
+            parse_line(r#"bind "enter" "slot1""#)?,
+            Some(ConfigItem::Bind("enter".to_owned(), "slot1".to_owned()))
+        );
+        assert_eq!(
+            parse_line(r#"bind"mouse1""+attack""#)?,
+            Some(ConfigItem::Bind("mouse1".to_owned(), "+attack".to_owned()))
+        );
+        assert_eq!(
+            parse_line(r#"  bind    "4" "slot4"     // Comment  "#)?,
+            Some(ConfigItem::Bind("4".to_owned(), "slot4".to_owned()))
+        );
+        assert!(parse_line(r#"bind "a" "non-ending string"#).is_err(),);
 
-        let (input, val) = string_literal(self.state.input)
-            .map_err(|i| anyhow!("invalid string literal, {}", i))?;
-
-        let input = ignore_whitespace(input);
-        if is_empty_or_comment(input) {
-            Ok(Some(ConfigItem::Bind(
-                self.state.key.to_owned(),
-                val.to_owned(),
-            )))
-        } else {
-            Err(anyhow!("invalid end of line, {}", input))
-        }
+        Ok(())
     }
-}
 
-pub fn parse_line(line: &str) -> Result<Option<ConfigItem>> {
-    State::<IdentParser>::init(line)
-        .map(|s| s.next())
-        .map(|s| s.next())
-        .map_result(|s| s.next())
+    #[test]
+    fn test_cvar_parsing() -> Result<(), ParseError> {
+        assert_eq!(
+            parse_line(r#"sensitivity "1.5""#)?,
+            Some(ConfigItem::Cvar("sensitivity".to_owned(), "1.5".to_owned()))
+        );
+        assert_eq!(
+            parse_line(r#"   volume     "0.5"  // Comment here  "#)?,
+            Some(ConfigItem::Cvar("volume".to_owned(), "0.5".to_owned()))
+        );
+        assert!(parse_line(r#"hud_scaling 0.8"#).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cmd_parsing() -> Result<(), ParseError> {
+        assert_eq!(
+            parse_line(r#"  unbindall    "#)?,
+            Some(ConfigItem::Command("unbindall".to_owned()))
+        );
+        assert_eq!(
+            parse_line(r#"disconnect   //Comment Foo  "#)?,
+            Some(ConfigItem::Command("disconnect".to_owned()))
+        );
+        assert!(parse_line(r#"1quit"#).is_err());
+
+        Ok(())
+    }
 }

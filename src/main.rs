@@ -1,5 +1,5 @@
-use anyhow::Result;
-
-fn main() -> Result<()> {
-    csgocfg::run()
+fn main() {
+    if let Err(e) = csgocfg::run() {
+        eprintln!("Error: {}", e);
+    }
 }

@@ -1,5 +1,6 @@
 use std::{cmp::Ordering, hash::Hash, io::Write};
 
+#[derive(Debug)]
 pub enum ConfigItem {
     Command(String),
     Bind(String, String),
@@ -36,8 +37,8 @@ impl PartialEq for ConfigItem {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (ConfigItem::Command(cmd), ConfigItem::Command(other_cmd)) => cmd == other_cmd,
-            (ConfigItem::Bind(key, ..), ConfigItem::Command(other_key, ..)) => key == other_key,
-            (ConfigItem::Cvar(cvar, ..), ConfigItem::Cvar(other_cvar, ..)) => cvar == other_cvar,
+            (ConfigItem::Bind(key, _), ConfigItem::Bind(other_key, _)) => key == other_key,
+            (ConfigItem::Cvar(cvar, _), ConfigItem::Cvar(other_cvar, _)) => cvar == other_cvar,
             _ => false,
         }
     }
