@@ -1,66 +1,6 @@
 use crate::config::ConfigItem;
 use thiserror::Error;
 
-type ParseResult<'a, Output> = Result<(&'a str, Output), &'a str>;
-
-fn match_literal(expected: &'static str) -> impl Fn(&str) -> ParseResult<&'static str> {
-    move |input: &str| {
-        let n = expected.len();
-        match input
-            .chars()
-            .zip(expected.chars())
-            .position(|(a, b)| a != b)
-        {
-            None if input.len() >= n => Ok((&input[n..], expected)),
-            _ => Err(input),
-        }
-    }
-}
-
-fn ignore_whitespace(input: &str) -> &str {
-    match input.chars().position(|c| c != ' ') {
-        Some(index) => &input[index..],
-        _ => &input[input.len()..],
-    }
-}
-
-fn match_until_char(expected: char) -> impl Fn(&str) -> ParseResult<&str> {
-    move |input: &str| match input.chars().position(|c| c == expected) {
-        Some(index) => Ok((&input[index..], &input[..index])),
-        _ => Err(input),
-    }
-}
-
-fn identifier(input: &str) -> ParseResult<&str> {
-    let mut chars = input.chars();
-
-    if chars
-        .next()
-        .filter(|&c| c.is_alphabetic() || c == '_' || c == '@')
-        .is_none()
-    {
-        return Err(input);
-    };
-
-    match chars.position(|c| !(c.is_alphanumeric() || c == '_' || c == '@')) {
-        Some(index) => Ok((&input[index + 1..], &input[..index + 1])),
-        None => Ok((&input[input.len()..], input)),
-    }
-}
-
-fn string_literal(input: &str) -> ParseResult<&str> {
-    let match_quote = match_literal("\"");
-    let match_until_quote = match_until_char('"');
-
-    match_quote(input)
-        .and_then(|(i, _)| match_until_quote(i))
-        .and_then(|(i, contents)| match_quote(i).map(|(i, _)| (i, contents)))
-}
-
-fn is_empty_or_comment(input: &str) -> bool {
-    input.is_empty() || match_literal("//")(input).is_ok()
-}
-
 #[derive(Error, Debug, PartialEq)]
 pub enum ParseError {
     #[error("invalid identifier `{0}`")]
@@ -108,6 +48,66 @@ pub fn parse_line(line: &str) -> Result<Option<ConfigItem>, ParseError> {
     }
 
     Err(ParseError::UnexpectedEndOfLine(input.to_owned()))
+}
+
+type ParseResult<'a, Output> = Result<(&'a str, Output), &'a str>;
+
+fn ignore_whitespace(input: &str) -> &str {
+    match input.chars().position(|c| c != ' ') {
+        Some(index) => &input[index..],
+        _ => &input[input.len()..],
+    }
+}
+
+fn string_literal(input: &str) -> ParseResult<&str> {
+    let match_quote = match_literal("\"");
+    let match_until_quote = match_until_char('"');
+
+    match_quote(input)
+        .and_then(|(i, _)| match_until_quote(i))
+        .and_then(|(i, contents)| match_quote(i).map(|(i, _)| (i, contents)))
+}
+
+fn match_until_char(expected: char) -> impl Fn(&str) -> ParseResult<&str> {
+    move |input: &str| match input.chars().position(|c| c == expected) {
+        Some(index) => Ok((&input[index..], &input[..index])),
+        _ => Err(input),
+    }
+}
+
+fn identifier(input: &str) -> ParseResult<&str> {
+    let mut chars = input.chars();
+
+    if chars
+        .next()
+        .filter(|&c| c.is_alphabetic() || c == '_' || c == '@')
+        .is_none()
+    {
+        return Err(input);
+    };
+
+    match chars.position(|c| !(c.is_alphanumeric() || c == '_' || c == '@')) {
+        Some(index) => Ok((&input[index + 1..], &input[..index + 1])),
+        None => Ok((&input[input.len()..], input)),
+    }
+}
+
+fn is_empty_or_comment(input: &str) -> bool {
+    input.is_empty() || match_literal("//")(input).is_ok()
+}
+
+fn match_literal(expected: &'static str) -> impl Fn(&str) -> ParseResult<&'static str> {
+    move |input: &str| {
+        let n = expected.len();
+        match input
+            .chars()
+            .zip(expected.chars())
+            .position(|(a, b)| a != b)
+        {
+            None if input.len() >= n => Ok((&input[n..], expected)),
+            _ => Err(input),
+        }
+    }
 }
 
 #[cfg(test)]

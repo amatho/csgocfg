@@ -44,43 +44,16 @@ enum Command {
     Unrecognized(String),
 }
 
-fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Error> {
-    let mut args = args.into_iter();
+pub fn run() -> Result<(), Error> {
+    let command = parse_args(std::env::args().skip(1))?;
 
-    let command = args
-        .next()
-        .ok_or_else(|| Error::UnrecognizedCommand("no command".to_owned()))?;
+    match command {
+        Command::Patch { target, patch } => apply_patch(target, patch)?,
+        Command::Validate { target } => validate(target)?,
+        Command::Unrecognized(s) => return Err(Error::UnrecognizedCommand(s)),
+    }
 
-    let command = match &command[..] {
-        "patch" => {
-            let target_path = args
-                .next()
-                .ok_or_else(|| Error::MissingArgument("target"))?;
-            let target = Path::new(&target_path)
-                .canonicalize()
-                .map_err(|_| Error::FileNotFound(target_path))?;
-
-            let patch_path = args.next().ok_or_else(|| Error::MissingArgument("patch"))?;
-            let patch = Path::new(&patch_path)
-                .canonicalize()
-                .map_err(|_| Error::FileNotFound(patch_path))?;
-
-            Command::Patch { target, patch }
-        }
-        "validate" => {
-            let target_path = args
-                .next()
-                .ok_or_else(|| Error::MissingArgument("target"))?;
-            let target = Path::new(&target_path)
-                .canonicalize()
-                .map_err(|_| Error::FileNotFound(target_path))?;
-
-            Command::Validate { target }
-        }
-        _ => Command::Unrecognized(command),
-    };
-
-    Ok(command)
+    Ok(())
 }
 
 fn apply_patch(target: PathBuf, patch: PathBuf) -> Result<(), Error> {
@@ -135,14 +108,41 @@ fn validate(target: PathBuf) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn run() -> Result<(), Error> {
-    let command = parse_args(std::env::args().skip(1))?;
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Error> {
+    let mut args = args.into_iter();
 
-    match command {
-        Command::Patch { target, patch } => apply_patch(target, patch)?,
-        Command::Validate { target } => validate(target)?,
-        Command::Unrecognized(s) => return Err(Error::UnrecognizedCommand(s)),
-    }
+    let command = args
+        .next()
+        .ok_or_else(|| Error::UnrecognizedCommand("no command".to_owned()))?;
 
-    Ok(())
+    let command = match &command[..] {
+        "patch" => {
+            let target_path = args
+                .next()
+                .ok_or_else(|| Error::MissingArgument("target"))?;
+            let target = Path::new(&target_path)
+                .canonicalize()
+                .map_err(|_| Error::FileNotFound(target_path))?;
+
+            let patch_path = args.next().ok_or_else(|| Error::MissingArgument("patch"))?;
+            let patch = Path::new(&patch_path)
+                .canonicalize()
+                .map_err(|_| Error::FileNotFound(patch_path))?;
+
+            Command::Patch { target, patch }
+        }
+        "validate" => {
+            let target_path = args
+                .next()
+                .ok_or_else(|| Error::MissingArgument("target"))?;
+            let target = Path::new(&target_path)
+                .canonicalize()
+                .map_err(|_| Error::FileNotFound(target_path))?;
+
+            Command::Validate { target }
+        }
+        _ => Command::Unrecognized(command),
+    };
+
+    Ok(command)
 }
