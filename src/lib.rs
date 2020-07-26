@@ -6,13 +6,15 @@ use parser::ParseError;
 use std::{
     collections::BTreeSet,
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
 };
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("no command specified")]
+    NoCommandSpecified,
     #[error("unrecognized command `{0}`")]
     UnrecognizedCommand(String),
     #[error("missing argument `{0}`")]
@@ -48,18 +50,29 @@ pub fn run() -> Result<(), Error> {
     let command = parse_args(std::env::args().skip(1))?;
 
     match command {
-        Command::Patch { target, patch } => apply_patch(target, patch)?,
-        Command::Validate { target } => validate(target)?,
+        Command::Patch { target, patch } => apply_patch(&target, &patch)?,
+        Command::Validate { target } => validate(&target)?,
         Command::Unrecognized(s) => return Err(Error::UnrecognizedCommand(s)),
     }
 
     Ok(())
 }
 
-fn apply_patch(target: PathBuf, patch: PathBuf) -> Result<(), Error> {
+pub fn usage() {
+    println!(
+        "usage: csgocfg <command> [<args>]
+
+Valid commands are:
+
+    patch <target> <patch>      Applies the given patch onto the target
+    validate <file>             Validates a config file"
+    );
+}
+
+pub fn apply_patch(target: &Path, patch: &Path) -> Result<(), Error> {
     let mut config_set: BTreeSet<ConfigItem> = BTreeSet::new();
 
-    let target_reader = BufReader::new(File::open(&target)?);
+    let target_reader = BufReader::new(File::open(target)?);
     for (index, line) in target_reader.lines().enumerate() {
         let line = line?;
         let config_item = parser::parse_line(&line).map_err(|e| (e, index))?;
@@ -69,7 +82,7 @@ fn apply_patch(target: PathBuf, patch: PathBuf) -> Result<(), Error> {
         }
     }
 
-    let patch_reader = BufReader::new(File::open(&patch)?);
+    let patch_reader = BufReader::new(File::open(patch)?);
     for (index, line) in patch_reader.lines().enumerate() {
         let line = line?;
         let config_item = parser::parse_line(&line).map_err(|e| (e, index))?;
@@ -84,7 +97,7 @@ fn apply_patch(target: PathBuf, patch: PathBuf) -> Result<(), Error> {
         .truncate(true)
         .open(&target)?;
     for value in config_set {
-        value.write_string(&mut target_file)?;
+        writeln!(target_file, "{}", value)?;
     }
 
     println!(
@@ -96,8 +109,8 @@ fn apply_patch(target: PathBuf, patch: PathBuf) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate(target: PathBuf) -> Result<(), Error> {
-    let target_reader = BufReader::new(File::open(&target)?);
+pub fn validate(target: &Path) -> Result<(), Error> {
+    let target_reader = BufReader::new(File::open(target)?);
     for (index, line) in target_reader.lines().enumerate() {
         let line = line?;
         parser::parse_line(&line).map_err(|e| (e, index))?;
@@ -111,9 +124,7 @@ fn validate(target: PathBuf) -> Result<(), Error> {
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Error> {
     let mut args = args.into_iter();
 
-    let command = args
-        .next()
-        .ok_or_else(|| Error::UnrecognizedCommand("no command".to_owned()))?;
+    let command = args.next().ok_or_else(|| Error::NoCommandSpecified)?;
 
     let command = match &command[..] {
         "patch" => {
